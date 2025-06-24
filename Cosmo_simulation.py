@@ -6,27 +6,36 @@ import numpy as np
 from numba import jit
 import matplotlib.pyplot as plt
 import mpmath as mp
+import os
+from matplotlib.colors import LogNorm
 
-# parameters 
-N       = 100000            # number of particles
-sigma_x = 0.15
-sigma_y = 0.10
-m       = 1.0 / N           # particle mass
-sigma_p = m * 1e-4          # momentum-space width (very narrow!)
+# Use it
+N = 1000000
+sigma_x, sigma_y = 0.10, 0.10 #isotropic initial conditions
+sigma_p_factor = 1e-4
+m = 1.0 / N
+sigma_p = sigma_p_factor * m
+ngrid = 64
+dt = 1.0
+np.random.seed(0)
+X0 = np.empty((N, 2))
+X0[:, 0] = (0.5 + sigma_x * np.random.randn(N)) % 1.0
+X0[:, 1] = (0.5 + sigma_y * np.random.randn(N)) % 1.0
+P0 = sigma_p * np.random.randn(N, 2)
 
-# sample configuration space 
-# draw from N(0.5, σ²) for x and y, then wrap into [0,1)
-X = np.empty((N, 2))
-X[:, 0] = 0.5 + sigma_x * np.random.randn(N)   # x–coordinate
-X[:, 1] = 0.5 + sigma_y * np.random.randn(N)   # y–coordinate
-X = np.fmod(X, 1.0)                     # periodic domain [0,1)²
 
-# sample momentum space 
-P = np.empty_like(X)
-P[:]  = sigma_p * np.random.randn(N, 2)        # (p_x , p_y)
+'''---------NEW----------'''
+# Cosmology :
 
-# X and P are now both shape (N, 2).  Each particle has mass m = 1/N.
-print(X.shape, P.shape, m, sigma_p)
+def H(a, H0=0.1, Om=0.3, Ol=0.7):
+    """Flat ΛCDM (radiation ignored)   units: H0 in code-time-1"""
+    return H0*np.sqrt(Om/a**3 + Ol)
+
+def advance_a(a, dt, H0, Om, Ol):
+    # 2-stage (KDK) leap-frog for the scale factor
+    a_half = a + 0.5*dt*a*H(a, H0, Om, Ol)   # drift
+    a_new  = a +       dt*a_half*H(a_half, H0, Om, Ol)   # kick
+    return a_half, a_new
 
 
 
@@ -77,13 +86,11 @@ def cic_deposit(X, Y, W, ngrid):
 ngrid = 64
 weights = np.full(N, 1.0 / N)       # each particle has mass m = 1/N
 
-rho = cic_deposit(X[:,0], X[:,1], weights, ngrid)
-
-# optional sanity check: total mass should be 1 (within round-off)
-print("Σρ ΔxΔy =", rho.sum())       # should print ≈ 1.0
+rho = cic_deposit(X0[:,0], X0[:,1], weights, ngrid)
 
 
-def poisson_solve(rho):
+''' Update poisson solver to account for a '''
+def poisson_solve(rho, a):
     """
     Solve ∇²ϕ = –ρ (Poisson equation) on anNxN periodic grid
     and return:
@@ -112,9 +119,9 @@ def poisson_solve(rho):
     fay = -1j * ky * fphi
 
     # 5. inverse FFT back to real space
-    phi = np.real(np.fft.ifft2(fphi))
-    ax  = np.real(np.fft.ifft2(fax))
-    ay  = np.real(np.fft.ifft2(fay))
+    phi = np.real(np.fft.ifft2(fphi)) 
+    ax  = np.real(np.fft.ifft2(fax)) / a**2
+    ay  = np.real(np.fft.ifft2(fay)) / a**2
 
     return phi, ax, ay
 
@@ -146,48 +153,104 @@ def cic_interpolate(X, Y, field):
         )
     return out
 
- 
+''' Update leapfrog PIC step to include the scale factor a '''
 # 2.  Leap-frog integrator following the requested seven steps
+def leapfrog_pic_step(X, P, m, a, ngrid=64, dt=1.0, H0 = 0.1, Om=0.3, Ol=0.7):#
 
-def leapfrog_pic(X, P, m, ngrid=64, dt=1.0, n_steps=200):
-    """
-    Leapfrog (drift-kick-drift) Vlasov-Poisson integrator using user-supplied
-    cic_deposit, poisson_solve, cic_interpolate.
-    """
-    X = np.ascontiguousarray(X, dtype=np.float64)
-    P = np.ascontiguousarray(P, dtype=np.float64)
-    N = X.shape[0]
-    W = np.full(N, m, dtype=np.float64)          # equal particle masses
+    # scale factor a
+    a_half, a_new = advance_a(a, dt, H0, Om, Ol)
+    H_half = H(a_half, H0, Om, Ol)
 
-    for _ in range(n_steps):
-        # 1. half-drift
-        X += 0.5 * dt * P / m
-        X %= 1.0
+    W = np.full(X.shape[0], m)
 
-        # 2. deposit density ρ^{n+1/2}
-        rho = cic_deposit(X[:, 0], X[:, 1], W, ngrid)
+    # 1. half-drift (update with a_half)
+    X += 0.5 * dt * P / (m*a_half)
+    X %= 1.0 # inside boundaries 
 
-        # 3. mesh accelerations a^{n+1/2}
-        _, ax, ay = poisson_solve(rho)
+    # 2. deposit
+    rho = cic_deposit(X[:, 0], X[:, 1], W, ngrid)
+    rho = rho / np.mean(rho)  # normalize to mean density
 
-        # 4. inverse-interpolate to particle accelerations A^{n+1/2}
-        A = np.empty_like(X)
-        A[:, 0] = cic_interpolate(X[:, 0], X[:, 1], ax)
-        A[:, 1] = cic_interpolate(X[:, 0], X[:, 1], ay)
+    # 3. solve field
+    _, ax, ay = poisson_solve(rho, a_half)
 
-        # 5. kick full step for momenta
-        P += m * dt * A
+    # 4. interpolate
+    A = np.empty_like(X)
+    A[:, 0] = cic_interpolate(X[:, 0], X[:, 1], ax)
+    A[:, 1] = cic_interpolate(X[:, 0], X[:, 1], ay)
 
-        # 6. second half-drift
-        X += 0.5 * dt * P / m
-        X %= 1.0
+    # 5. kick --> updated
+    P += m * dt * A - H_half * dt * P
 
-        # loop proceeds to next n
+    # 6. second half-drift
+    X += 0.5 * dt * P / (m* a_new)
+    X %= 1.0
 
-    # final density for visualisation
-    rho_final = cic_deposit(X[:, 0], X[:, 1], W, ngrid)
-    return X, P, rho_final
+    return X, P, rho, a_new
 
+
+# --- initial conditions ----------------------
+a0      = 0.01               # start at z = 99
+H0      = 0.1
+Omega_m = 0.3
+Omega_L = 0.7
+
+X  = X0.copy()
+P  = P0.copy()
+a  = a0
+
+from matplotlib.animation import FuncAnimation, PillowWriter
+
+# ---------------------------------------------
+# 1) run the simulation and keep snapshots
+# ---------------------------------------------
+n_steps        = 300
+snapshot_every = 10          # grab every 10th step
+frames         = []          # list of (rho, a, t)
+
+X, P, a = X0.copy(), P0.copy(), a0
+t       = 0.0
+for step in range(n_steps + 1):
+    if step % snapshot_every == 0:
+        rho = cic_deposit(X[:,0], X[:,1],
+                          np.full(X.shape[0], m), ngrid)
+        frames.append((rho.copy(), a, t))
+
+    X, P, rho, a = leapfrog_pic_step(X, P, m, a, dt=dt,H0=H0, Om=Omega_m, Ol=Omega_L)
+    t += dt                      # cosmic-time accumulator
+
+# ---------------------------------------------
+# 2) quick single-frame inspection
+# ---------------------------------------------
+rho0, a0_plot, t0 = frames[0]
+plt.figure(figsize=(5,5))
+plt.imshow(rho0, origin='lower', norm=LogNorm(),
+           cmap='viridis', extent=[0,1,0,1])
+plt.colorbar(label='ρ / ⟨ρ⟩')
+plt.title(f'a = {a0_plot:.3f}  (z = {1/a0_plot - 1:.1f})')
+plt.xlabel('x [comoving box units]')
+plt.ylabel('y')
+plt.tight_layout()
+plt.show()
+
+# ---------------------------------------------
+fig, ax = plt.subplots(figsize=(5,5))
+im  = ax.imshow(frames[0][0], origin='lower', norm=LogNorm(),
+                cmap='viridis', extent=[0,1,0,1])
+txt = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+              color='w', ha='left', va='top')
+
+def update(i):
+    rho_i, a_i, t_i = frames[i]
+    im.set_data(rho_i)
+    txt.set_text(f'a = {a_i:.3f}  (z = {1/a_i - 1:.1f})')
+    return im, txt
+
+ani = FuncAnimation(fig, update, frames=len(frames), blit=True)
+ani.save('collapse_cosmo.gif', writer=PillowWriter(fps=8))
+plt.close(fig)
+print('saved collapse_cosmo.gif')
+'''
 # Use it
 N = 1000000
 sigma_x, sigma_y = 0.15, 0.10
@@ -205,21 +268,38 @@ X0[:, 1] = (0.5 + sigma_y * np.random.randn(N)) % 1.0
 P0 = sigma_p * np.random.randn(N, 2)
 
 # evolve
-Xf, Pf, rho_f = leapfrog_pic(X0, P0, m, ngrid=ngrid, dt=dt, n_steps=n_steps)
 
-# 4.  Visualise final density
-plt.figure(figsize=(5, 4))
-plt.imshow(
-    rho_f.T,
-    origin="lower",
-    cmap="magma",
-    interpolation="bilinear",
-   # norm=LogNorm(),
-   )
+def visualize_time_evolution(N=10**6, M=64, dt=1.0, n_steps=300, 
+                             sigma_x=0.15, sigma_y=0.10, sigma_p_factor=1e-4,
+                             output_dir="frames", snapshot_interval=10):
+    
+    # Initial conditions
+    m = 1.0 / N
+    sigma_p = sigma_p_factor * m
+    np.random.seed(42)
+    X = np.empty((N, 2))
+    X[:, 0] = (0.5 + sigma_x * np.random.randn(N)) % 1.0
+    X[:, 1] = (0.5 + sigma_y * np.random.randn(N)) % 1.0
+    P = sigma_p * np.random.randn(N, 2)
 
-plt.title(fr"Particle density, N={N} at $t = {n_steps} $")
-plt.xlabel("$x$")
-plt.ylabel("$y$")
-plt.colorbar(label="rho")
-plt.tight_layout()
-plt.show()
+    # Create output folder
+    os.makedirs(output_dir, exist_ok=True)
+
+    for step in range(n_steps + 1):
+        X, P, rho = leapfrog_pic_step(X, P, m, ngrid=M, dt=dt)
+
+        if step % snapshot_interval == 0:
+            plt.figure(figsize=(6, 5))
+            plt.imshow(rho, origin='lower', cmap='viridis', norm=LogNorm(), extent=[0, 1, 0, 1])
+            plt.title(f"t = {step * dt:.1f}, M = {M}")
+            plt.xlabel("x")
+            plt.ylabel("y")
+            plt.colorbar(label='Density')
+            plt.tight_layout()
+            plt.savefig(f"{output_dir}/frame_{step:04d}.png")
+            plt.close()
+
+    print(f"\nSaved {n_steps // snapshot_interval + 1} frames to '{output_dir}/'")
+
+visualize_time_evolution(M=64, sigma_p_factor=1e-4, n_steps=300, snapshot_interval=10)
+'''
