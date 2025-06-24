@@ -12,7 +12,7 @@ import os, pathlib, imageio
 # 0.  User-level parameters
 # ================================================================
 N        = 1024 * 1024            # MUST be a perfect square = ngrid_ic**2
-ngrid    = 64                    # force-mesh for Poisson
+ngrid    = 512                    # force-mesh for Poisson
 alpha_PS = -2.5                  # slope of P(k) ∝ k^alpha  (try −2.5 … 0)
 seed     = 42
 # cosmology
