@@ -2,8 +2,8 @@
 frames_c/
 frames_b/
 frames_a/
-frames old/
-frames new/
+frames_old/
+frames_new/
 # Ignore Python virtual environments
 .venv/
 
