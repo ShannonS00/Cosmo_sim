@@ -1,9 +1,5 @@
 # Ignore output frames
-frames_c/
-frames_b/
-frames_a/
-frames_old/
-frames_new/
+frames/
 # Ignore Python virtual environments
 .venv/
 

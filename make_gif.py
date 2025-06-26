@@ -2,7 +2,7 @@ import imageio
 import os
 from natsort import natsorted  # To sort filenames numerically
 
-def make_gif_from_frames(frame_folder="frames", gif_name="simulation.gif", fps=10):
+def make_gif_from_frames(frame_folder="frames", gif_name="simulation.gif", fps=3):
     # Get all PNG files and sort them numerically
     filenames = natsorted([
         os.path.join(frame_folder, fname)
@@ -21,4 +21,4 @@ def make_gif_from_frames(frame_folder="frames", gif_name="simulation.gif", fps=1
     print(f"✅ GIF saved as '{gif_name}' with {len(images)} frames at {fps} fps.")
 
 
-make_gif_from_frames(frame_folder="frames_b", gif_name="density_evolution_512.gif", fps=10)
+make_gif_from_frames(frame_folder="Neuer", gif_name="Cosmo.gif", fps=3)
