@@ -6,4 +6,3 @@ frames_old/
 frames_new/
 # Ignore Python virtual environments
 .venv/
-

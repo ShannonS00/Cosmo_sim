@@ -27,8 +27,10 @@ Q0[:, 1] = (0.5 + sigma_y * rng.standard_normal(N)) % boxsize
 
 # ------------------ Physikalische peculiar-Geschwindigkeiten ----------
 sigma_v = 1e-4           # km/s oder was immer deine Code-Units sind
-V0      = sigma_v * rng.standard_normal((N, 2)) 
+#V0      = sigma_v * rng.standard_normal((N, 2)) 
 
+
+# Add initial displacement to positions
 
 
 def cic_deposit(X, Y, W, ngrid):
@@ -107,7 +109,7 @@ def poisson_solve(delta, a, Omega_m=0.3089):
     fdelta = np.fft.fft2(delta)
 
     # --- Poisson solver in Fourier space -----------------------------
-    prefac = -(3.0/2.0) * Omega_m / a           # RHS factor
+    prefac = -(3.0/2.0) * Omega_m / a * 50.0        # RHS factor
     fphi   = prefac * fdelta / k2
     fphi[0, 0] = 0.0                            # set mean(Φ) = 0
 
@@ -209,63 +211,131 @@ def leapfrog_cosmo(Q, V, m, a, da, ngrid=64,
     return Q, V, a, rho
 
 
+ngrid = 1024                  # choose the same size you use later
+boxsize = 1.0
+da = 1e-4
+a0 = 0.02
+a_final = 0.4
+# ---------------------------------------------------------------------
+# helper to generate a Gaussian δ-field with an arbitrary P(k)
+# ---------------------------------------------------------------------
+def gaussian_field_from_Pk(Pk, ngrid, boxsize=1.0, seed=None):
+    rng  = np.random.default_rng(seed)
+    kfreq = 2*np.pi*np.fft.fftfreq(ngrid, d=boxsize/ngrid)
+    kx, ky = np.meshgrid(kfreq, kfreq, indexing='ij')
+    k      = np.sqrt(kx**2 + ky**2)
+    # random complex coeffs with Hermitian symmetry
+    amp    = np.sqrt(Pk(k)/2.0)
+    rand   = rng.standard_normal((ngrid,ngrid)) + 1j*rng.standard_normal((ngrid,ngrid))
+    delta_k       = amp * rand
+    delta_k[0, 0] = 0.0                              # ⟨δ⟩ = 0
+    delta_k       = (delta_k + np.conj(np.rot90(delta_k, 2)))/2.0
+    delta         = np.fft.ifft2(delta_k).real
+    return delta
+# ---------------------------------------------------------------------
 
-# Time evoluiton 
-# ---------- main evolution routine ------------------------------------
-def visualize_scale_factor_evolution(N               = 1000000,
-                                     ngrid           = 512,
-                                     a0              = 0.05,   # ≈ z = 19
-                                     a_final         = 0.08,    # today
-                                     da              = 1e-5,
-                                     sigma_x         = 0.15,
-                                     sigma_y         = 0.10,
-                                     sigma_v         = 1e-5,   # velocity width
-                                     output_dir      = "frames_c",
-                                     snapshot_every  = 30):
+def visualize_scale_factor_evolution(
+        N               = ngrid**2,        # for IC=’spectrum’ it *must* equal ngrid²
+        ngrid           = ngrid,
+        a0              = a0,          # start redshift z ≈ 19
+        a_final         = a_final,
+        da              = da,
+        sigma_x         = 0.15,          # used only for ic_type="blob"
+        sigma_y         = 0.10,
+        sigma_v         = 3e-3,          # thermal scatter (blob) *or* Zel’dovich fHΨ
+        ic_type         = "spectrum",        # "blob"  or  "spectrum"
+        Pk              = None,          # function(k) -> P(k); needed for "spectrum"
+        output_dir      = "frames",
+        snapshot_every  = 30):
     """
-    Make PNG snapshots of ρ(a) every `snapshot_every` steps.
+    Evolve an overdensity in scale-factor time and dump PNG snapshots.
 
-    The routine assumes you already imported:
-        leapfrog_cosmo, cic_deposit, poisson_solve, cic_interpolate
+    - ic_type = "blob":   same Gaussian bump you used before.
+    - ic_type = "spectrum": particles placed on a grid and displaced by a
+      Gaussian field with power spectrum Pk(k).  N must equal ngrid² then.
     """
-    # ---- ICs ----------------------------------------------------------
-    m   = 1.0 / N
-    rng = np.random.default_rng(seed=42)
+    # -----------------------------------------------------------------
+    # 0 · build initial positions Q and velocities V
+    # -----------------------------------------------------------------
+    boxsize = 1.0
+    rng     = np.random.default_rng(seed=42)
 
-    Q = np.empty((N, 2))
-    Q[:, 0] = (0.5 + sigma_x * rng.standard_normal(N)) % 1.0
-    Q[:, 1] = (0.5 + sigma_y * rng.standard_normal(N)) % 1.0
-    V = sigma_v * rng.standard_normal((N, 2))        # physical peculiar vel.
+    if ic_type == "blob":
+        Q = np.empty((N, 2))
+        Q[:, 0] = (0.5 + sigma_x * rng.standard_normal(N)) % 1.0
+        Q[:, 1] = (0.5 + sigma_y * rng.standard_normal(N)) % 1.0
+        V = sigma_v * rng.standard_normal((N, 2))              # thermal
 
-    a  = a0
+    elif ic_type == "spectrum":
+        if Pk is None:
+            raise ValueError("Provide a Pk(k) function for ic_type='spectrum'")
+        if N != ngrid**2:
+            raise ValueError("For spectrum ICs use one particle per cell:  N = ngrid**2")
+
+        # 1. Gaussian δ field
+        delta = gaussian_field_from_Pk(Pk, ngrid, seed=43)
+        delta = delta*50
+        # 2. potential Φ and displacement Ψ = –∇Φ
+        kfreq   = 2*np.pi*np.fft.fftfreq(ngrid, d=boxsize/ngrid)
+        kx, ky  = np.meshgrid(kfreq, kfreq, indexing='ij')
+        k2      = kx**2 + ky**2;  k2[0,0] = 1.0
+        phi_k   = -np.fft.fft2(delta) / k2
+        phi     = np.fft.ifft2(phi_k).real
+        psi_x   = -np.gradient(phi, boxsize/ngrid, axis=0)
+        psi_y   = -np.gradient(phi, boxsize/ngrid, axis=1)
+
+        # 3. regular grid of particles
+        qx, qy  = np.meshgrid((np.arange(ngrid)+0.5)/ngrid,
+                              (np.arange(ngrid)+0.5)/ngrid, indexing='ij')
+        Q       = np.column_stack([qx.ravel(), qy.ravel()])
+        disp    = np.column_stack([psi_x.ravel(), psi_y.ravel()]) * a0 *20 # D(a₀)≈a₀
+        Q       = (Q + disp) % 1.0                                      # periodic
+
+        # 4. Zel’dovich velocity (optional; else keep zero)
+        f0      = 1.0                             # at high z   f ≈ 1
+        V       = -a0 * H0 * f0 * disp            # minus sign = infall
+
+    else:
+        raise ValueError("ic_type must be 'blob' or 'spectrum'")
+
+    # -----------------------------------------------------------------
+    # 1 · run the simulation
+    # -----------------------------------------------------------------
+    m = 1.0 / N
+    a = a0
     os.makedirs(output_dir, exist_ok=True)
 
-    n_steps = int(np.ceil((a_final - a0) / da))
-    for step in range(n_steps + 1):
+    for step in range(int(np.ceil((a_final - a0) / da)) + 1):
+        # snapshot BEFORE updating, so frame shows a = current a
         if step % snapshot_every == 0:
-            # deposit & visualise BEFORE moving – cheapest place to get ρ
             rho = cic_deposit(Q[:,0], Q[:,1], np.full(N, m), ngrid)
             plt.figure(figsize=(5.5, 5))
             plt.imshow(rho, origin='lower', norm=LogNorm(),
                        cmap='viridis', extent=[0, 1, 0, 1])
             z   = 1.0/a - 1.0
-            plt.title(f"a = {a:.4f}   (z = {z:.1f})")
+            plt.title(f"a = {a:.4f}   (z = {z:.1f})  |  M = {ngrid}, N = {N}")
             plt.xlabel("x");  plt.ylabel("y")
-            plt.colorbar(label='mass / cell')
+            plt.colorbar(label='ρ / cell')
             plt.tight_layout()
             plt.savefig(f"{output_dir}/frame_{step:05d}.png")
             plt.close()
 
-        # ---------- one DKD step in scale-factor time ------------------
+        # --- one DKD step -------------------------------------------
         Q, V, a, _ = leapfrog_cosmo(Q, V, m, a, da,
-                                    ngrid=ngrid,
-                                    Omega_m=Omega_m, Omega_L=Omega_L)
+                                    ngrid   = ngrid,
+                                    Omega_m = Omega_m,
+                                    Omega_L = Omega_L)
+        if a >= a_final: break
 
-        if a >= a_final:        # don’t overshoot if da doesn’t divide evenly
-            break
+    print(f"finished:  a = {a:.4f}")
 
-    n_saved = step // snapshot_every + 1
-    print(f"Saved {n_saved} frames to “{output_dir}/”.  Final a = {a:.4f}")
+# ---- 2. spectrum IC with a simple n = –1 power law -------------------
+def Pk_powerlaw(k, n=-1.0, k0=2*np.pi):      # k0 = fundamental mode
+    return (k + 1e-12)**n * k0**(-n)         # avoid k=0
 
-
-visualize_scale_factor_evolution()
+visualize_scale_factor_evolution(ic_type="blob",
+                                 ngrid=ngrid,            # N must be ngrid²
+                                 N=ngrid**2,
+                                 a0=a0,
+                                 Pk=Pk_powerlaw,
+                                 output_dir="frames_Pk_n-1")
