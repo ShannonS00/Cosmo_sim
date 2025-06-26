@@ -1,0 +1,6 @@
+# Ignore output frames
+frames_c/
+frames_b/
+frames_a/
+# Ignore Python virtual environments
+.venv/
