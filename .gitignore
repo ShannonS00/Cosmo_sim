@@ -1,9 +1,13 @@
 # Ignore output frames
-frames_c/
-frames_b/
-frames_a/
-frames_old/
-frames_new/
+frames/
 # Ignore Python virtual environments
 .venv/
 
+3D_case.py
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+# Ignore Python bytecode files
+__pycache__/
+
+# ignore python file physical.py
+physical.py

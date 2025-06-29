@@ -27,9 +27,8 @@ Q0[:, 1] = (0.5 + sigma_y * rng.standard_normal(N)) % boxsize
 
 # ------------------ Physikalische peculiar-Geschwindigkeiten ----------
 sigma_v = 1e-4           # km/s oder was immer deine Code-Units sind
-V0      = sigma_v * rng.standard_normal((N, 2)) 
-
-
+v_phys      = sigma_v * rng.standard_normal((N, 2)) 
+V0      = (a0**2) * v_phys / H0 
 
 def cic_deposit(X, Y, W, ngrid):
     """
@@ -209,18 +208,50 @@ def leapfrog_cosmo(Q, V, m, a, da, ngrid=64,
     return Q, V, a, rho
 
 
+def compute_power_spectrum(delta, boxsize=1.0):
+    N = delta.shape[0]
+    delta_k = np.fft.fft2(delta)
+    P_k = np.abs(delta_k)**2 / N**4  # normalize
+
+    # Compute wave numbers
+    kx = np.fft.fftfreq(N, d=boxsize/N) * 2 * np.pi
+    ky = np.fft.fftfreq(N, d=boxsize/N) * 2 * np.pi
+    kx, ky = np.meshgrid(kx, ky, indexing='ij')
+    k = np.sqrt(kx**2 + ky**2)
+
+    # Flatten arrays
+    k_flat = k.flatten()
+    P_flat = P_k.flatten()
+
+    # Bin in k
+    k_bins = np.linspace(0.0, k.max(), num=N//2)
+    k_centers = 0.5 * (k_bins[1:] + k_bins[:-1])
+    P_bin = np.zeros(len(k_centers))
+    counts = np.zeros(len(k_centers))
+
+    for i in range(len(k_flat)):
+        bin_idx = np.searchsorted(k_bins, k_flat[i]) - 1
+        if 0 <= bin_idx < len(P_bin):
+            P_bin[bin_idx] += P_flat[i]
+            counts[bin_idx] += 1
+
+    P_bin /= np.maximum(counts, 1)
+
+    return k_centers, P_bin
+
+
 
 # Time evoluiton 
 # ---------- main evolution routine ------------------------------------
-def visualize_scale_factor_evolution(N               = 1000000,
-                                     ngrid           = 512,
+def visualize_scale_factor_evolution(N               = 10000,
+                                     ngrid           = 128,
                                      a0              = 0.05,   # ≈ z = 19
-                                     a_final         = 0.08,    # today
-                                     da              = 1e-5,
+                                     a_final         = 0.09,    # today
+                                     da              = 1e-4,
                                      sigma_x         = 0.15,
                                      sigma_y         = 0.10,
-                                     sigma_v         = 1e-5,   # velocity width
-                                     output_dir      = "frames_c",
+                                     sigma_v         = 1e-4,   # velocity width
+                                     output_dir      = "frames_v",
                                      snapshot_every  = 30):
     """
     Make PNG snapshots of ρ(a) every `snapshot_every` steps.
@@ -235,7 +266,11 @@ def visualize_scale_factor_evolution(N               = 1000000,
     Q = np.empty((N, 2))
     Q[:, 0] = (0.5 + sigma_x * rng.standard_normal(N)) % 1.0
     Q[:, 1] = (0.5 + sigma_y * rng.standard_normal(N)) % 1.0
-    V = sigma_v * rng.standard_normal((N, 2))        # physical peculiar vel.
+    #converet to comoving coordinates
+    #Q *= a0 
+
+    V0 = sigma_v * rng.standard_normal((N, 2))        # physical peculiar vel.
+    V = (a0**2) * V0 / H0                          # convert to comoving
 
     a  = a0
     os.makedirs(output_dir, exist_ok=True)
@@ -254,6 +289,16 @@ def visualize_scale_factor_evolution(N               = 1000000,
             plt.colorbar(label='mass / cell')
             plt.tight_layout()
             plt.savefig(f"{output_dir}/frame_{step:05d}.png")
+            plt.close()
+            delta = rho / rho.mean() - 1.0
+
+            k_vals, P_vals = compute_power_spectrum(delta)
+            plt.figure()
+            plt.loglog(k_vals, P_vals)
+            plt.xlabel("k")
+            plt.ylabel("P(k)")
+            plt.title(f"Power Spectrum at a = {a:.4f}")
+            plt.savefig(f"{output_dir}/powerspec_{step:05d}.png")
             plt.close()
 
         # ---------- one DKD step in scale-factor time ------------------
