@@ -12,6 +12,4 @@ __pycache__/
 # ignore python file physical.py
 physical.py
 
-.gitignore
-
 make_gif.py
