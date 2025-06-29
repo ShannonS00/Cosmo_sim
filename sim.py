@@ -27,8 +27,8 @@ Q0[:, 1] = (0.5 + sigma_y * rng.standard_normal(N)) % boxsize
 
 # ------------------ Physikalische peculiar-Geschwindigkeiten ----------
 sigma_v = 1e-4           # km/s oder was immer deine Code-Units sind
-V0      = sigma_v * rng.standard_normal((N, 2)) 
-
+v_phys      = sigma_v * rng.standard_normal((N, 2)) 
+V0      = (a0**2) * v_phys / H0 
 
 def cic_deposit(X, Y, W, ngrid):
     """
@@ -243,7 +243,7 @@ def compute_power_spectrum(delta, boxsize=1.0):
 
 # Time evoluiton 
 # ---------- main evolution routine ------------------------------------
-def visualize_scale_factor_evolution(N               = 100000,
+def visualize_scale_factor_evolution(N               = 10000,
                                      ngrid           = 128,
                                      a0              = 0.05,   # ≈ z = 19
                                      a_final         = 0.09,    # today
@@ -251,7 +251,7 @@ def visualize_scale_factor_evolution(N               = 100000,
                                      sigma_x         = 0.15,
                                      sigma_y         = 0.10,
                                      sigma_v         = 1e-4,   # velocity width
-                                     output_dir      = "frames_p",
+                                     output_dir      = "frames_v",
                                      snapshot_every  = 30):
     """
     Make PNG snapshots of ρ(a) every `snapshot_every` steps.
@@ -266,7 +266,11 @@ def visualize_scale_factor_evolution(N               = 100000,
     Q = np.empty((N, 2))
     Q[:, 0] = (0.5 + sigma_x * rng.standard_normal(N)) % 1.0
     Q[:, 1] = (0.5 + sigma_y * rng.standard_normal(N)) % 1.0
-    V = sigma_v * rng.standard_normal((N, 2))        # physical peculiar vel.
+    #converet to comoving coordinates
+    #Q *= a0 
+
+    V0 = sigma_v * rng.standard_normal((N, 2))        # physical peculiar vel.
+    V = (a0**2) * V0 / H0                          # convert to comoving
 
     a  = a0
     os.makedirs(output_dir, exist_ok=True)

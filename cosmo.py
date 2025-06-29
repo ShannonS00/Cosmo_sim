@@ -5,14 +5,14 @@ from matplotlib.colors import LogNorm
 from scipy.interpolate import RegularGridInterpolator
 
 # --- Setup ---
-N = 512 * 512
-ngrid = 512
+N = 128 * 128
+ngrid = 128
 boxsize = 1.0
 a0 = 0.01
-a_final = 0.03
-da = 1e-5
+a_final = 0.9
+da = 1e-3
 snapshot_every = 30
-output_dir = Path("Cosmo_frames_da1e-5")
+output_dir = Path("Cosmo_frames_d")
 output_dir.mkdir(exist_ok=True)
 
 # power spectrum 
@@ -27,15 +27,39 @@ def generate_grid_particles(N, boxsize=1.0):
     x, y = np.meshgrid(lin, lin, indexing='ij')
     return np.column_stack((x.ravel(), y.ravel()))
 
-# --- Gaussian field ---
+def enforce_hermitian(fk):
+    """Force fk(i,j)=conj[fk(−i,−j)] so that ifft2 gives a real field."""
+    N = fk.shape[0]
+    fk[0, 0] = np.real(fk[0, 0])          # k=0 always real
+    for i in range(N):
+        for j in range((N//2)+1):         # only need left half-plane
+            ii, jj = (-i) % N, (-j) % N
+            if (i, j) != (ii, jj):
+                fk[ii, jj] = np.conj(fk[i, j])
+            else:                          # Nyquist / axis modes
+                fk[i, j] = np.real(fk[i, j])
+    return fk
+'''# --- Gaussian field ---
 def enforce_hermitian(fk):
     N = fk.shape[0]
     fk[0, 0] = np.real(fk[0, 0])
     for i in range(1, N):
         for j in range(1, N // 2):
             fk[-i, -j] = np.conj(fk[i, j])
-    return fk
+    return fk'''
+def generate_real_space_delta(N, Pk_func, boxsize=1.0):
+    kx = np.fft.fftfreq(N, d=boxsize/N) * 2*np.pi   # <-- consistent grid
+    ky = np.fft.fftfreq(N, d=boxsize/N) * 2*np.pi
+    kx, ky = np.meshgrid(kx, ky, indexing='ij')
+    k  = np.hypot(kx, ky)
 
+    amp   = np.sqrt(Pk_func(k) / 2.0)
+    phase = np.random.uniform(0, 2*np.pi, k.shape)
+    delta_k = amp * (np.cos(phase) + 1j*np.sin(phase))
+    delta_k = enforce_hermitian(delta_k)
+    return np.fft.ifft2(delta_k).real
+
+'''
 def generate_real_space_delta(N, Pk_func):
     kx = np.fft.fftfreq(N) * 2 * np.pi * N
     ky = np.fft.fftfreq(N) * 2 * np.pi * N
@@ -46,6 +70,7 @@ def generate_real_space_delta(N, Pk_func):
     delta_k = amplitude * (np.cos(phase) + 1j * np.sin(phase))
     return np.fft.ifft2(enforce_hermitian(delta_k)).real
 
+'''
 # --- Zeldovich displacement ---
 def compute_displacement(delta, boxsize=1.0):
     N = delta.shape[0]
@@ -62,6 +87,7 @@ def compute_displacement(delta, boxsize=1.0):
 def apply_displacement(Q, disp_x, disp_y, boxsize=1.0):
     N = disp_x.shape[0]
     grid = np.linspace(0, boxsize, N, endpoint=False)
+    Q = Q % boxsize # addded 
     interp_x = RegularGridInterpolator((grid, grid), disp_x, bounds_error=False, fill_value=0)
     interp_y = RegularGridInterpolator((grid, grid), disp_y, bounds_error=False, fill_value=0)
     return (Q + np.stack([interp_x(Q), interp_y(Q)], axis=1)) % boxsize
@@ -82,8 +108,36 @@ def cic_deposit(X, Y, W, ngrid):
         rho[il, jr] += (1-dx)*dy*w
         rho[ir, jl] += dx*(1-dy)*w
         rho[ir, jr] += dx*dy*w
-    return rho
+    return rho 
+# changed 
+def compute_power_spectrum(delta, boxsize=1.0):
+    N        = delta.shape[0]
+    delta_k  = np.fft.fft2(delta)
+    cell_area = (boxsize / N)**2
+    P_k      = (np.abs(delta_k)**2 / N**4) * cell_area
 
+    kx = np.fft.fftfreq(N, d=boxsize/N) * 2*np.pi
+    ky = np.fft.fftfreq(N, d=boxsize/N) * 2*np.pi
+    kx, ky = np.meshgrid(kx, ky, indexing='ij')
+    k      = np.hypot(kx, ky).flatten()
+    P_flat = P_k.flatten()
+
+    sel     = k > 0
+    k, P_flat = k[sel], P_flat[sel]
+
+    k_bins = np.logspace(np.log10(k.min()), np.log10(k.max()), N//2 + 1)
+
+    k_cent  = 0.5*(k_bins[1:] + k_bins[:-1])
+    P_bin   = np.zeros_like(k_cent)
+    counts  = np.zeros_like(k_cent)
+    idx     = np.searchsorted(k_bins, k) - 1
+    idx = np.clip(idx, 0, len(k_bins) - 2)        # len(P_bin) == len(k_bins)-1
+    np.add.at(P_bin, idx, P_flat)
+    np.add.at(counts, idx, 1)
+
+    return k_cent, P_bin / np.maximum(counts, 1)
+
+'''
 def compute_power_spectrum(delta, boxsize=1.0):
     N = delta.shape[0]
     delta_k = np.fft.fft2(delta)
@@ -104,6 +158,7 @@ def compute_power_spectrum(delta, boxsize=1.0):
             P_bin[idx] += P_flat[i]
             counts[idx] += 1
     return k_centers, P_bin / np.maximum(counts, 1)
+    '''
 
 # --- Cosmology ---
 def E(a, Omega_m=0.3089, Omega_L=0.6911):
@@ -115,7 +170,7 @@ def I_drift(a, da):
 
 def I_kick(a, da):
     a_mid = a + 0.5 * da
-    return da / (a_mid * E(a_mid))
+    return da / (a_mid**2 * E(a_mid)) #changed to a**2 from just a
 
 def poisson_solve(delta, a, Omega_m=0.3089):
     N = delta.shape[0]
@@ -124,7 +179,7 @@ def poisson_solve(delta, a, Omega_m=0.3089):
     k2 = kx**2 + ky**2
     k2[0, 0] = 1.0
     fdelta = np.fft.fft2(delta)
-    prefac = -(3.0 / 2.0) * Omega_m / a
+    prefac = -(3.0 / 2.0) * Omega_m * a #changed from /a
     fphi = prefac * fdelta / k2
     fphi[0, 0] = 0.0
     ax = -np.fft.ifft2(1j * kx * fphi).real
@@ -175,11 +230,12 @@ V_init = np.zeros_like(Q_init)
 Q = Q_init.copy()
 V = V_init.copy()
 a = a0
-m = 1.0 / N
+m = 1.0 / Q.shape[0]  # mass per particle
+# --- Initial density field ---
 
 # --- Evolve with snapshots ---
 step = 0
-while a < a_final:
+while a < a_final- 0.5*da:
     if step % snapshot_every == 0:
         rho = cic_deposit(Q[:, 0], Q[:, 1], np.full(N, m), ngrid)
         delta = rho / rho.mean() - 1.0
